@@ -1,11 +1,17 @@
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
 
+logger = logging.getLogger(__name__)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    try:
+        await init_db()
+    except Exception as e:
+        logger.error("DB 초기화 실패 (DATABASE_URL 설정을 확인하세요): %s", e)
     yield
 
 app = FastAPI(title="약조심 API", version="0.1.0", lifespan=lifespan)
