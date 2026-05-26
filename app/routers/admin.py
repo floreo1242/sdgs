@@ -86,39 +86,48 @@ async def _process_page(db: AsyncSession, items: list) -> int:
     return added
 
 
-@router.post("/sync-dur")
-async def sync_dur(db: AsyncSession = Depends(get_db)):
-    if not settings.dur_api_key:
-        raise HTTPException(status_code=400, detail="DUR_API_KEY가 설정되지 않았습니다.")
-
+async def _run_sync_dur():
     added = 0
     total_fetched = 0
+    try:
+        async with httpx.AsyncClient() as client:
+            first = await _fetch_page(client, 1, num_rows=50)
+            body = first.get("body", {})
+            total = int(body.get("totalCount", 0))
+            pages = (total + 49) // 50
+            logger.info("DUR 동기화 시작: 총 %d건, %d페이지", total, pages)
 
-    async with httpx.AsyncClient() as client:
-        # 1페이지로 전체 건수 파악
-        first = await _fetch_page(client, 1, num_rows=50)
-        body = first.get("body", {})
-        total = int(body.get("totalCount", 0))
-        pages = (total + 49) // 50
-
-        items = body.get("items", [])
-        if isinstance(items, dict):
-            items = [items]
-        total_fetched += len(items)
-        added += await _process_page(db, items)
-
-        # 나머지 페이지: 페이지마다 처리 후 즉시 커밋
-        for page in range(2, pages + 1):
-            data = await _fetch_page(client, page, num_rows=50)
-            items = data.get("body", {}).get("items", [])
+            items = body.get("items", [])
             if isinstance(items, dict):
                 items = [items]
-            elif not isinstance(items, list):
-                items = []
-            total_fetched += len(items)
-            added += await _process_page(db, items)
 
-    return {"message": f"DUR 병용금기 {added}건 저장 완료", "total_fetched": total_fetched}
+            async with SessionLocal() as db:
+                total_fetched += len(items)
+                added += await _process_page(db, items)
+
+                for page in range(2, pages + 1):
+                    data = await _fetch_page(client, page, num_rows=50)
+                    items = data.get("body", {}).get("items", [])
+                    if isinstance(items, dict):
+                        items = [items]
+                    elif not isinstance(items, list):
+                        items = []
+                    total_fetched += len(items)
+                    added += await _process_page(db, items)
+                    if page % 100 == 0:
+                        logger.info("DUR 동기화 진행 중: %d/%d 페이지", page, pages)
+
+        logger.info("DUR 동기화 완료: %d건 저장, %d건 수집", added, total_fetched)
+    except Exception:
+        logger.exception("DUR 동기화 중 오류 발생")
+
+
+@router.post("/sync-dur", status_code=202)
+async def sync_dur(background_tasks: BackgroundTasks):
+    if not settings.dur_api_key:
+        raise HTTPException(status_code=400, detail="DUR_API_KEY가 설정되지 않았습니다.")
+    background_tasks.add_task(_run_sync_dur)
+    return {"message": "DUR 동기화 시작됨. /api/v1/admin/stats 로 진행 상황 확인 가능."}
 
 
 @router.get("/probe-dur")
